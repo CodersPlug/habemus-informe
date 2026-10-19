@@ -1,6 +1,6 @@
-// Informe diario Habemus. No es el informe de Alianza.
-// El reloj (GitHub Actions, tres horarios) solo invoca esta función.
-// La función publica el HTML y manda el resumen. KV evita un segundo WhatsApp el mismo día.
+// Informe diario Habemus.
+// El reloj es cron-job.org (lun–vie 09:00 ART). La función publica el HTML
+// y manda el resumen a Walter y a Sol. KV evita un segundo WhatsApp el mismo día.
 async function handler(request, env) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -11,9 +11,10 @@ async function handler(request, env) {
 
   const KAPSO_KEY = env.KAPSO_API_KEY || "";
   const INTEGRATION_ID = "421d9cd5-f199-40a4-954e-c08a9bb9aace";
-  const PHONE_NUMBER_ID = "2785440984814264";
-  const SABRINA = "5491132668495";
+  const PHONE_NUMBER_ID = "1186696851196125";
+  const RECIPIENTS = ["5491132334209", "5491166340394"];
   const TEMPLATE_NAME = "habemus_informe_diario";
+  const TEMPLATE_LANG = "es";
   const TEMPLATE_NAMES = ["fecha", "total", "n", "nmov", "url"];
   const TZ = "America/Argentina/Buenos_Aires";
 
@@ -79,7 +80,7 @@ async function handler(request, env) {
       dry_run: true,
       date: local.ymd,
       weekday: local.weekday,
-      to: SABRINA,
+      to: RECIPIENTS,
       idem_key: idemKey,
       report_text: reportText,
       meta: Object.assign({ detail_url: url, host: published.host }, built.meta)
@@ -93,7 +94,7 @@ async function handler(request, env) {
       skipped: true,
       reason: "already_sent_today",
       date: local.ymd,
-      to: SABRINA,
+      to: RECIPIENTS,
       idem_key: idemKey,
       report_text: reportText,
       meta: Object.assign({ detail_url: url, host: published.host }, built.meta)
@@ -107,51 +108,54 @@ async function handler(request, env) {
     nmov: String(built.meta.recientes),
     url
   };
-  const templateAttempt = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
-    messaging_product: "whatsapp",
-    to: SABRINA,
-    type: "template",
-    template: {
-      name: TEMPLATE_NAME,
-      language: { code: "es_AR" },
-      components: [{
-        type: "body",
-        parameters: TEMPLATE_NAMES.map((name) => ({
-          type: "text",
-          parameter_name: name,
-          text: sanitizeTemplateParam(templateParams[name])
-        }))
-      }]
+  const sends = [];
+  for (const to of RECIPIENTS) {
+    const templateAttempt = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
+      messaging_product: "whatsapp",
+      to,
+      type: "template",
+      template: {
+        name: TEMPLATE_NAME,
+        language: { code: TEMPLATE_LANG },
+        components: [{
+          type: "body",
+          parameters: TEMPLATE_NAMES.map((name) => ({
+            type: "text",
+            parameter_name: name,
+            text: sanitizeTemplateParam(templateParams[name])
+          }))
+        }]
+      }
+    });
+    if (templateAttempt.ok) {
+      sends.push({ to, via: "template", ok: true });
+      continue;
     }
-  });
-  let sendVia = null;
-  let whatsapp = templateAttempt;
-  if (templateAttempt.ok) {
-    sendVia = "template";
-  } else {
     const textAttempt = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
       messaging_product: "whatsapp",
-      to: SABRINA,
+      to,
       type: "text",
       text: { body: reportText, preview_url: true }
     });
-    whatsapp = { template: templateAttempt, text: textAttempt };
-    if (textAttempt.ok) sendVia = "text_fallback";
-  }
-  if (!sendVia) {
+    if (textAttempt.ok) {
+      sends.push({ to, via: "text_fallback", ok: true });
+      continue;
+    }
     return json({
       error: "whatsapp_send_failed",
       date: local.ymd,
-      to: SABRINA,
+      to,
       report_text: reportText,
       meta: Object.assign({ detail_url: url, host: published.host }, built.meta),
-      whatsapp
+      sends,
+      whatsapp: { template: templateAttempt, text: textAttempt }
     }, 502, cors);
   }
+  const sendVia = sends.every((s) => s.via === "template") ? "template" : "mixed";
 
   await env.KV.put(idemKey, JSON.stringify({
     sent_at: new Date().toISOString(),
-    to: SABRINA,
+    to: RECIPIENTS,
     via: sendVia,
     report: "habemus"
   }), { expirationTtl: 60 * 60 * 36 });
@@ -161,12 +165,12 @@ async function handler(request, env) {
     dry_run: false,
     date: local.ymd,
     weekday: local.weekday,
-    to: SABRINA,
+    to: RECIPIENTS,
     idem_key: idemKey,
     send_via: sendVia,
     report_text: reportText,
     meta: Object.assign({ detail_url: url, host: published.host }, built.meta),
-    whatsapp
+    sends
   }, 200, cors);
 }
 
