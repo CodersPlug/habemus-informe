@@ -1,0 +1,25 @@
+{
+  "name": "habemus_informe_diario",
+  "language": "es_AR",
+  "category": "UTILITY",
+  "parameter_format": "NAMED",
+  "components": [
+    {
+      "type": "BODY",
+      "text": "Informe diario de Habemus Bar. Fecha del reporte: {{fecha}}.\nCuentas corrientes abiertas, suma de las filas en Debemos: {{total}} ({{n}} facturas).\nMovimientos con fecha en los ultimos dias: {{nmov}}.\nEl detalle de cada proveedor, factura y movimiento esta en esta pagina: {{url}}\nSi hay un error, responda este chat.",
+      "example": {
+        "body_text_named_params": [
+          { "param_name": "fecha", "example": "19/10/2026" },
+          { "param_name": "total", "example": "$4.812.478,81" },
+          { "param_name": "n", "example": "20" },
+          { "param_name": "nmov", "example": "4" },
+          { "param_name": "url", "example": "https://codersplug.github.io/habemus-informe/" }
+        ]
+      }
+    },
+    {
+      "type": "FOOTER",
+      "text": "Habemus Bar"
+    }
+  ]
+}

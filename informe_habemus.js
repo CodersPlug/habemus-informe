@@ -13,6 +13,8 @@ async function handler(request, env) {
   const INTEGRATION_ID = "421d9cd5-f199-40a4-954e-c08a9bb9aace";
   const PHONE_NUMBER_ID = "2785440984814264";
   const SABRINA = "5491132668495";
+  const TEMPLATE_NAME = "habemus_informe_diario";
+  const TEMPLATE_NAMES = ["fecha", "total", "n", "nmov", "url"];
   const TZ = "America/Argentina/Buenos_Aires";
 
   let body = {};
@@ -98,13 +100,45 @@ async function handler(request, env) {
     }, 200, cors);
   }
 
-  const whatsapp = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
+  const templateParams = {
+    fecha: local.dmy,
+    total: fmtMoney(built.meta.total),
+    n: String(built.meta.cuentas),
+    nmov: String(built.meta.recientes),
+    url
+  };
+  const templateAttempt = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
     messaging_product: "whatsapp",
     to: SABRINA,
-    type: "text",
-    text: { body: reportText, preview_url: true }
+    type: "template",
+    template: {
+      name: TEMPLATE_NAME,
+      language: { code: "es_AR" },
+      components: [{
+        type: "body",
+        parameters: TEMPLATE_NAMES.map((name) => ({
+          type: "text",
+          parameter_name: name,
+          text: sanitizeTemplateParam(templateParams[name])
+        }))
+      }]
+    }
   });
-  if (!whatsapp.ok) {
+  let sendVia = null;
+  let whatsapp = templateAttempt;
+  if (templateAttempt.ok) {
+    sendVia = "template";
+  } else {
+    const textAttempt = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
+      messaging_product: "whatsapp",
+      to: SABRINA,
+      type: "text",
+      text: { body: reportText, preview_url: true }
+    });
+    whatsapp = { template: templateAttempt, text: textAttempt };
+    if (textAttempt.ok) sendVia = "text_fallback";
+  }
+  if (!sendVia) {
     return json({
       error: "whatsapp_send_failed",
       date: local.ymd,
@@ -118,6 +152,7 @@ async function handler(request, env) {
   await env.KV.put(idemKey, JSON.stringify({
     sent_at: new Date().toISOString(),
     to: SABRINA,
+    via: sendVia,
     report: "habemus"
   }), { expirationTtl: 60 * 60 * 36 });
 
@@ -128,6 +163,7 @@ async function handler(request, env) {
     weekday: local.weekday,
     to: SABRINA,
     idem_key: idemKey,
+    send_via: sendVia,
     report_text: reportText,
     meta: Object.assign({ detail_url: url, host: published.host }, built.meta),
     whatsapp
@@ -210,6 +246,14 @@ function buildReport(table, local) {
     reportText,
     meta: { cuentas: cc.length, total: totalCc, recientes: recent.length, desde: since }
   };
+}
+
+function sanitizeTemplateParam(value) {
+  return String(value ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 200) || "-";
 }
 
 function money(raw) {
