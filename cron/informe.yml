@@ -1,0 +1,57 @@
+# LIVE clock — informe Habemus.
+# El reloj solo invoca la función. La función publica el HTML y manda el WhatsApp.
+# Tres horarios (08:45, 09:00, 09:15 ART) contra el jitter de GitHub Actions.
+# KV en la función: solo el primero manda; los siguientes salen skipped.
+
+name: Habemus — informe diario
+
+on:
+  schedule:
+    - cron: "45 11 * * 1-5"
+    - cron: "0 12 * * 1-5"
+    - cron: "15 12 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build report, do not send)"
+        type: boolean
+        default: false
+      force:
+        description: "Force send even on weekend / resend today"
+        type: boolean
+        default: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke Kapso informe Habemus
+        env:
+          KAPSO_API_KEY: ${{ secrets.KAPSO_API_KEY }}
+          FN_ID: 75fca26c-c671-4546-9a79-063651c073d1
+          DRY: ${{ github.event.inputs.dry_run || 'false' }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ "${DRY}" == "true" ]]; then
+            BODY='{"dry_run":true,"force":true}'
+          elif [[ "${FORCE}" == "true" ]]; then
+            BODY='{"force":true,"force_resend":true}'
+          else
+            BODY='{}'
+          fi
+          curl -sS -f -X POST \
+            -H "X-API-Key: ${KAPSO_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: HabemusInformeGitHubAction/1.0" \
+            --data-binary "${BODY}" \
+            "https://api.kapso.ai/platform/v1/functions/${FN_ID}/invoke" \
+            | tee /tmp/out.json
+          python3 - <<'PY'
+          import json,sys
+          d=json.load(open("/tmp/out.json"))
+          if d.get("error") and not d.get("skipped"):
+            print("FAILED", d)
+            sys.exit(1)
+          print("ok", d.get("ok"), "skipped", d.get("skipped"), "date", d.get("date"), "to", d.get("to"))
+          PY

@@ -1,5 +1,6 @@
 // Informe diario Habemus. No es el informe de Alianza.
-// Lee Movimientos, publica el HTML y, si send=true, manda el resumen a Sabrina.
+// El reloj (GitHub Actions, tres horarios) solo invoca esta función.
+// La función publica el HTML y manda el resumen. KV evita un segundo WhatsApp el mismo día.
 async function handler(request, env) {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -19,15 +20,18 @@ async function handler(request, env) {
   const input = body.input || body;
   const dryRun = !!(input.dry_run || input.dryRun);
   const force = !!(input.force || input.ignore_weekend);
-  const send = input.send === true && !dryRun;
 
   if (!KAPSO_KEY) return json({ error: "missing_KAPSO_API_KEY_secret" }, 500, cors);
 
   const local = localParts(TZ);
-  if (local.weekday === 0 || local.weekday === 6) {
-    if (!force && !dryRun) {
-      return json({ skipped: true, reason: "weekend", date: local.ymd }, 200, cors);
-    }
+  const isWeekday = local.weekday >= 1 && local.weekday <= 5;
+  if (!isWeekday && !force && !dryRun) {
+    return json({
+      skipped: true,
+      reason: "weekend",
+      date: local.ymd,
+      message: "Informe Habemus: solo dias habiles (lun-vie) America/Argentina/Buenos_Aires"
+    }, 200, cors);
   }
 
   const inv = await fetch(`https://app.kapso.ai/api/v1/integrations/${INTEGRATION_ID}/invoke`, {
@@ -49,24 +53,84 @@ async function handler(request, env) {
   }
   const table = (invJson.data && invJson.data.ret) || [];
   const built = buildReport(table, local);
-  let whatsapp = null;
-  if (send) {
-    whatsapp = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
-      messaging_product: "whatsapp",
-      to: SABRINA,
-      type: "text",
-      text: { body: built.reportText, preview_url: true }
-    });
+  const published = await publishReportHtml(built.html, env, { dryRun });
+  if (!dryRun && published.host !== "github_pages") {
+    return json({
+      error: "html_publish_failed",
+      meta: built.meta,
+      report_text: built.reportText,
+      publish: published,
+      hint: "Set GITHUB_TOKEN secret on the function. Pages repo keeps a single index.html."
+    }, 502, cors);
   }
+
+  const url = published.url || "https://codersplug.github.io/habemus-informe/";
+  const reportText = built.reportText.replace(
+    "https://codersplug.github.io/habemus-informe/",
+    url
+  );
+  const idemKey = `informe:habemus:${local.ymd}`;
+
+  if (dryRun) {
+    return json({
+      ok: true,
+      dry_run: true,
+      date: local.ymd,
+      weekday: local.weekday,
+      to: SABRINA,
+      idem_key: idemKey,
+      report_text: reportText,
+      meta: Object.assign({ detail_url: url, host: published.host }, built.meta)
+    }, 200, cors);
+  }
+
+  if (!env.KV) return json({ error: "missing_kv" }, 500, cors);
+  const already = await env.KV.get(idemKey);
+  if (already && !input.force_resend) {
+    return json({
+      skipped: true,
+      reason: "already_sent_today",
+      date: local.ymd,
+      to: SABRINA,
+      idem_key: idemKey,
+      report_text: reportText,
+      meta: Object.assign({ detail_url: url, host: published.host }, built.meta)
+    }, 200, cors);
+  }
+
+  const whatsapp = await sendWhatsApp(KAPSO_KEY, PHONE_NUMBER_ID, {
+    messaging_product: "whatsapp",
+    to: SABRINA,
+    type: "text",
+    text: { body: reportText, preview_url: true }
+  });
+  if (!whatsapp.ok) {
+    return json({
+      error: "whatsapp_send_failed",
+      date: local.ymd,
+      to: SABRINA,
+      report_text: reportText,
+      meta: Object.assign({ detail_url: url, host: published.host }, built.meta),
+      whatsapp
+    }, 502, cors);
+  }
+
+  await env.KV.put(idemKey, JSON.stringify({
+    sent_at: new Date().toISOString(),
+    to: SABRINA,
+    report: "habemus"
+  }), { expirationTtl: 60 * 60 * 36 });
+
   return json({
     ok: true,
-    date: local.dmy,
-    dry_run: dryRun,
-    sent: send,
-    whatsapp,
-    reportText: built.reportText,
-    html: built.html,
-    meta: built.meta
+    dry_run: false,
+    date: local.ymd,
+    weekday: local.weekday,
+    to: SABRINA,
+    idem_key: idemKey,
+    report_text: reportText,
+    meta: Object.assign({ detail_url: url, host: published.host }, built.meta),
+    whatsapp
   }, 200, cors);
 }
 
@@ -236,6 +300,73 @@ function reportHtmlShell(title, subtitle, bodyHtml, footer) {
 </main>
 </body>
 </html>`;
+}
+
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function ghApiHeaders(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    "User-Agent": "HabemusInforme",
+    Accept: "application/vnd.github+json"
+  };
+}
+
+async function cleanupExtraHtmlFiles(token, repo) {
+  const listRes = await fetch(`https://api.github.com/repos/${repo}/contents/`, {
+    headers: ghApiHeaders(token)
+  });
+  if (!listRes.ok) return;
+  const files = await listRes.json();
+  if (!Array.isArray(files)) return;
+  for (const f of files) {
+    if (f.type !== "file") continue;
+    const name = f.name || "";
+    if (name === "index.html" || !name.endsWith(".html")) continue;
+    await fetch(`https://api.github.com/repos/${repo}/contents/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: { ...ghApiHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ message: `Remove stale ${name}`, sha: f.sha, branch: "main" })
+    });
+  }
+}
+
+async function publishReportHtml(html, env, opts) {
+  const dryRun = !!(opts && opts.dryRun);
+  const repo = env.GITHUB_PAGES_REPO || "CodersPlug/habemus-informe";
+  const pagesUrl = env.GITHUB_PAGES_URL || "https://codersplug.github.io/habemus-informe/";
+  if (dryRun) return { url: pagesUrl, host: "dry_run" };
+  const token = env.GITHUB_TOKEN || "";
+  if (!token) return { url: "", host: "failed", error: "missing_GITHUB_TOKEN" };
+  await cleanupExtraHtmlFiles(token, repo);
+  const getRes = await fetch(`https://api.github.com/repos/${repo}/contents/index.html`, {
+    headers: ghApiHeaders(token)
+  });
+  let sha;
+  if (getRes.ok) {
+    const j = await getRes.json();
+    sha = j.sha;
+  }
+  const putBody = {
+    message: "Update informe Habemus",
+    content: utf8ToBase64(html),
+    branch: "main"
+  };
+  if (sha) putBody.sha = sha;
+  const putRes = await fetch(`https://api.github.com/repos/${repo}/contents/index.html`, {
+    method: "PUT",
+    headers: { ...ghApiHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify(putBody)
+  });
+  if (putRes.ok) return { url: pagesUrl, host: "github_pages" };
+  const errBody = await putRes.text();
+  if (/identical/i.test(errBody)) return { url: pagesUrl, host: "github_pages" };
+  return { url: "", host: "failed", status: putRes.status, body: errBody.slice(0, 200) };
 }
 
 function escapeHtml(s) {
